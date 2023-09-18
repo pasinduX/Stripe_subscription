@@ -1,194 +1,202 @@
 package main
 
 import (
-    "bytes"
-    "encoding/json"
-    "fmt"
-    "io"
-    "io/ioutil"
-    "log"
-    "net/http"
-    "os"
-    "github.com/stripe/stripe-go/v75"
-    portalsession "github.com/stripe/stripe-go/v75/billingportal/session"
-    "github.com/stripe/stripe-go/v75/checkout/session"
-    "github.com/stripe/stripe-go/v75/price"
-    "github.com/stripe/stripe-go/v75/webhook"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"os"
+
+	"github.com/joho/godotenv"
+	"github.com/stripe/stripe-go/v72"
+	portalsession "github.com/stripe/stripe-go/v72/billingportal/session"
+	"github.com/stripe/stripe-go/v72/checkout/session"
+	"github.com/stripe/stripe-go/v72/webhook"
 )
 
 func main() {
-    // This is your test secret API key.
-    stripe.Key = "sk_test_51NVdjpJEPR9stpONuru6iP31dEprM47X7py8L5rQyOIR43bzJUXtvwuFli13ed4Wna7FcdDnTQei2VqucH3tix5N006l6ASYXm"
+	if err := godotenv.Load(); err != nil {
+		log.Fatalf("godotenv.Load: %v", err)
+	}
 
-    http.Handle("/", http.FileServer(http.Dir("public")))
-    http.HandleFunc("/create-checkout-session", createCheckoutSession)
-    http.HandleFunc("/create-portal-session", createPortalSession)
-    http.HandleFunc("/webhook", handleWebhook)
-    addr := "localhost:4242"
-    log.Printf("Listening on %s", addr)
-    log.Fatal(http.ListenAndServe(addr, nil))
+	stripe.Key = os.Getenv("STRIPE_SECRET_KEY")
+
+	stripe.SetAppInfo(&stripe.AppInfo{
+		Name:    "stripe-samples/checkout-single-subscription",
+		Version: "0.0.1",
+		URL:     "https://github.com/stripe-samples/checkout-single-subscription",
+	})
+
+	http.Handle("/", http.FileServer(http.Dir(os.Getenv("STATIC_DIR"))))
+
+	http.HandleFunc("/config", handleConfig)
+	http.HandleFunc("/create-checkout-session", handleCreateCheckoutSession)
+	http.HandleFunc("/checkout-session", handleCheckoutSession)
+	http.HandleFunc("/customer-portal", handleCustomerPortal)
+	http.HandleFunc("/webhook", handleWebhook)
+	http.HandleFunc("/html/success.html", handleSuccessPage)
+
+	addr := "0.0.0.0:4242"
+	log.Printf("Listening on %s ...", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-func createCheckoutSession(w http.ResponseWriter, r *http.Request) {
-    if r.Method != "POST" {
-      http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-      return
-    }
-
-    r.ParseForm()
-    lookup_key := r.PostFormValue("lookup_key")
-
-    domain := "http://localhost:4242"
-    params := &stripe.PriceListParams{
-      LookupKeys: stripe.StringSlice([]string{
-        lookup_key,
-      }),
-    }
-    i := price.List(params)
-    if !i.Front() {
-      log.Printf(">>>>>>>>>>>>>>>>>>>>>>>>>>> Add a price lookup key to checkout.html line 27 for the demo <<<<<<<<<<<<<<<<<<<<<<<<")
-    }
-    var price *stripe.Price
-    for i.Next() {
-      p := i.Price()
-      price = p
-    }
-    checkoutParams := &stripe.CheckoutSessionParams{
-      Mode: stripe.String(string(stripe.CheckoutSessionModeSubscription)),
-      LineItems: []*stripe.CheckoutSessionLineItemParams{
-        &stripe.CheckoutSessionLineItemParams{
-          Price:    stripe.String(price.ID),
-          Quantity: stripe.Int64(1),
-        },
-      },
-      SuccessURL: stripe.String(domain + "/success.html?session_id={CHECKOUT_SESSION_ID}"),
-      CancelURL: stripe.String(domain + "/cancel.html"),
-    }
-
-    s, err := session.New(checkoutParams)
-    if err != nil {
-      log.Printf("session.New: %v", err)
-    }
-
-    http.Redirect(w, r, s.URL, http.StatusSeeOther)
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, struct {
+		PublishableKey string `json:"publishableKey"`
+		BasicPrice     string `json:"basicPrice"`
+		ProPrice       string `json:"proPrice"`
+	}{
+		PublishableKey: os.Getenv("STRIPE_PUBLISHABLE_KEY"),
+		BasicPrice:     os.Getenv("BASIC_PRICE_ID"),
+		ProPrice:       os.Getenv("PRO_PRICE_ID"),
+	}, nil)
 }
 
-func createPortalSession(w http.ResponseWriter, r *http.Request) {
-    domain := "http://localhost:4242"
-	  // For demonstration purposes, we're using the Checkout session to retrieve the customer ID.
-	  // Typically this is stored alongside the authenticated user in your database.
-    r.ParseForm()
-    sessionId := r.PostFormValue("session_id")
+func handleCreateCheckoutSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	r.ParseForm()
+	priceId := r.PostFormValue("priceId")
+	priceId = "price_1NrbSmJEPR9stpONKB1z5MnV"
+	fmt.Println("priceId: ", priceId)
+	params := &stripe.CheckoutSessionParams{
+		SuccessURL: stripe.String(os.Getenv("DOMAIN") + "/html/success.html?session_id={CHECKOUT_SESSION_ID}"),
+		CancelURL:  stripe.String(os.Getenv("DOMAIN") + "/canceled.html"),
+		Mode:       stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		LineItems: []*stripe.CheckoutSessionLineItemParams{
+			{
+				Price:    stripe.String(priceId),
+				Quantity: stripe.Int64(1),
+			},
+		},
+	}
 
-    fmt.Print(sessionId)
-    s, err := session.Get(sessionId, nil)
-
-    if err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
-      log.Printf("session.Get: %v", err)
-      return
-    }
-
-    // Authenticate your user.
-    params := &stripe.BillingPortalSessionParams{
-      Customer:  stripe.String(s.Customer.ID),
-      ReturnURL: stripe.String(domain),
-    }
-    ps, _ := portalsession.New(params)
-    log.Printf("ps.New: %v", ps.URL)
-
-    if err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
-      log.Printf("ps.New: %v", err)
-      return
-    }
-
-    http.Redirect(w, r, ps.URL, http.StatusSeeOther)
+	s, err := session.New(params)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	http.Redirect(w, r, s.URL, http.StatusSeeOther)
 }
 
-func handleWebhook(w http.ResponseWriter, req *http.Request) {
-    const MaxBodyBytes = int64(65536)
-    bodyReader := http.MaxBytesReader(w, req.Body, MaxBodyBytes)
-    payload, err := ioutil.ReadAll(bodyReader)
-    if err != nil {
-      fmt.Fprintf(os.Stderr, "Error reading request body: %v\n", err)
-      w.WriteHeader(http.StatusServiceUnavailable)
-      return
-    }
-    // Replace this endpoint secret with your endpoint's unique secret
-    // If you are testing with the CLI, find the secret by running 'stripe listen'
-    // If you are using an endpoint defined with the API or dashboard, look in your webhook settings
-    // at https://dashboard.stripe.com/webhooks
-    endpointSecret := "whsec_12345"
-    signatureHeader := req.Header.Get("Stripe-Signature")
-    event, err := webhook.ConstructEvent(payload, signatureHeader, endpointSecret)
-    if err != nil {
-      fmt.Fprintf(os.Stderr, "⚠️  Webhook signature verification failed. %v\n", err)
-      w.WriteHeader(http.StatusBadRequest) // Return a 400 error on a bad signature
-      return
-    }
-    // Unmarshal the event data into an appropriate struct depending on its Type
-    switch event.Type {
-    case "customer.subscription.deleted":
-      var subscription stripe.Subscription
-      err := json.Unmarshal(event.Data.Raw, &subscription)
-      if err != nil {
-        fmt.Fprintf(os.Stderr, "Error parsing webhook JSON: %v\n", err)
-        w.WriteHeader(http.StatusBadRequest)
-        return
-      }
-      log.Printf("Subscription deleted for %d.", subscription.ID)
-      // Then define and call a func to handle the deleted subscription.
-      // handleSubscriptionCanceled(subscription)
-    case "customer.subscription.updated":
-      var subscription stripe.Subscription
-      err := json.Unmarshal(event.Data.Raw, &subscription)
-      if err != nil {
-        fmt.Fprintf(os.Stderr, "Error parsing webhook JSON: %v\n", err)
-        w.WriteHeader(http.StatusBadRequest)
-        return
-      }
-      log.Printf("Subscription updated for %d.", subscription.ID)
-      // Then define and call a func to handle the successful attachment of a PaymentMethod.
-      // handleSubscriptionUpdated(subscription)
-    case "customer.subscription.created":
-      var subscription stripe.Subscription
-      err := json.Unmarshal(event.Data.Raw, &subscription)
-      if err != nil {
-        fmt.Fprintf(os.Stderr, "Error parsing webhook JSON: %v\n", err)
-        w.WriteHeader(http.StatusBadRequest)
-        return
-      }
-      log.Printf("Subscription created for %d.", subscription.ID)
-      // Then define and call a func to handle the successful attachment of a PaymentMethod.
-      // handleSubscriptionCreated(subscription)
-    case "customer.subscription.trial_will_end":
-      var subscription stripe.Subscription
-      err := json.Unmarshal(event.Data.Raw, &subscription)
-      if err != nil {
-        fmt.Fprintf(os.Stderr, "Error parsing webhook JSON: %v\n", err)
-        w.WriteHeader(http.StatusBadRequest)
-        return
-      }
-      log.Printf("Subscription trial will end for %d.", subscription.ID)
-      // Then define and call a func to handle the successful attachment of a PaymentMethod.
-      // handleSubscriptionTrialWillEnd(subscription)
-    default:
-      fmt.Fprintf(os.Stderr, "Unhandled event type: %s\n", event.Type)
-    }
-    w.WriteHeader(http.StatusOK)
-  }
+func handleCheckoutSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := r.URL.Query().Get("sessionId")
+	s, err := session.Get(sessionID, nil)
+	writeJSON(w, s, err)
+}
 
-  func writeJSON(w http.ResponseWriter, v interface{}) {
-    var buf bytes.Buffer
-    if err := json.NewEncoder(&buf).Encode(v); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
-      log.Printf("json.NewEncoder.Encode: %v", err)
-      return
-    }
-    w.Header().Set("Content-Type", "application/json")
-    if _, err := io.Copy(w, &buf); err != nil {
-      log.Printf("io.Copy: %v", err)
-      return
-  }
+func handleCustomerPortal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	r.ParseForm()
+	sessionID := r.PostFormValue("sessionId")[0:]
+
+	s, err := session.Get(sessionID, nil)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+
+	returnURL := os.Getenv("DOMAIN")
+
+	params := &stripe.BillingPortalSessionParams{
+		Customer:  stripe.String(s.Customer.ID),
+		ReturnURL: stripe.String(returnURL),
+	}
+	ps, _ := portalsession.New(params)
+
+	http.Redirect(w, r, ps.URL, http.StatusSeeOther)
+}
+
+func handleWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	b, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		log.Printf("ioutil.ReadAll: %v", err)
+		return
+	}
+
+	event, err := webhook.ConstructEvent(b, r.Header.Get("Stripe-Signature"), os.Getenv("STRIPE_WEBHOOK_SECRET"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		log.Printf("webhook.ConstructEvent: %v", err)
+		return
+	}
+
+	if event.Type != "checkout.session.completed" {
+		return
+	}
+
+	sessionObj := event.Data.Object
+	fmt.Println("sessionObj: ", sessionObj)
+	customerName := sessionObj["customer_details"].(map[string]interface{})["name"].(string)
+	amount := sessionObj["amount_total"].(float64) / 100
+	successStatus := sessionObj["payment_status"].(string)
+
+	fmt.Println("Customer Name: ", customerName)
+	fmt.Println("Amount: $", amount)
+	fmt.Println("Success Status: ", successStatus)
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}, err error) {
+	var respVal interface{}
+	if err != nil {
+		msg := err.Error()
+		var serr *stripe.Error
+		if errors.As(err, &serr) {
+			msg = serr.Msg
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		var e errResp
+		e.Error.Message = msg
+		respVal = e
+	} else {
+		respVal = v
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(respVal); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("json.NewEncoder.Encode: %v", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := io.Copy(w, &buf); err != nil {
+		log.Printf("io.Copy: %v", err)
+		return
+	}
+}
+
+func handleSuccessPage(w http.ResponseWriter, r *http.Request) {
+	// Serve the success page
+	http.ServeFile(w, r, "client/success.html")
+}
+
+type errResp struct {
+	Error struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
